@@ -1,0 +1,21 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Gas Balance Settings",
+                "description": "Configure the MQTT topics for your Gas Balance sensor.",
+                "data": {
+                    "name": "Name",
+                    "topic": "Balance MQTT Topic",
+                    "bill_topic": "Bill MQTT Topic"
+                }
+            }
+        },
+        "error": {
+            "already_configured": "Service is already configured"
+        },
+        "abort": {
+            "already_configured": "Service is already configured"
+        }
+    }
+}

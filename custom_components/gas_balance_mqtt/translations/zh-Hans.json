@@ -1,0 +1,26 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "燃气余额设置",
+                "description": "配置燃气余额传感器的 MQTT 主题。",
+                "data": {
+                    "name": "名称",
+                    "topic": "余额 MQTT 主题",
+                    "bill_topic": "账单 MQTT 主题",
+                    "yearly_step_2_start_volume": "年阶梯二起始用量",
+                    "yearly_step_3_start_volume": "年阶梯三起始用量",
+                    "year_step_1_price": "年阶梯一价格",
+                    "year_step_2_price": "年阶梯二价格",
+                    "year_step_3_price": "年阶梯三价格"
+                }
+            }
+        },
+        "error": {
+            "already_configured": "服务已配置"
+        },
+        "abort": {
+            "already_configured": "服务已配置"
+        }
+    }
+}
