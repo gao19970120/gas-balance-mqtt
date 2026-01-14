@@ -710,6 +710,7 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
                 self._attributes["last_record_time"] = data.get("lastRecordTime")
                 
                 # Recalculate yearly usage whenever data updates
+                self._calculate_yearly_usage()
                 self._calculate_natural_month_data()
                 self._calculate_yearly_usage()
                 
