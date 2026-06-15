@@ -7,12 +7,36 @@
                 "data": {
                     "name": "Name",
                     "topic": "Balance MQTT Topic",
-                    "bill_topic": "Bill MQTT Topic"
+                    "bill_topic": "Bill MQTT Topic",
+                    "tier_cycle_start_md": "Annual tier start date (MM-DD)",
+                    "tier_cycle_end_md": "Annual tier end date (MM-DD)",
+                    "yearly_step_2_start_volume": "Annual tier 2 start usage",
+                    "yearly_step_3_start_volume": "Annual tier 3 start usage",
+                    "year_step_1_price": "Annual tier 1 price",
+                    "year_step_2_price": "Annual tier 2 price",
+                    "year_step_3_price": "Annual tier 3 price"
+                }
+            },
+            "init": {
+                "title": "Gas Balance Settings",
+                "description": "Update MQTT topics, annual tier period, and tier prices. The integration reloads after saving.",
+                "data": {
+                    "name": "Name",
+                    "topic": "Balance MQTT Topic",
+                    "bill_topic": "Bill MQTT Topic",
+                    "tier_cycle_start_md": "Annual tier start date (MM-DD)",
+                    "tier_cycle_end_md": "Annual tier end date (MM-DD)",
+                    "yearly_step_2_start_volume": "Annual tier 2 start usage",
+                    "yearly_step_3_start_volume": "Annual tier 3 start usage",
+                    "year_step_1_price": "Annual tier 1 price",
+                    "year_step_2_price": "Annual tier 2 price",
+                    "year_step_3_price": "Annual tier 3 price"
                 }
             }
         },
         "error": {
-            "already_configured": "Service is already configured"
+            "already_configured": "Service is already configured",
+            "invalid_date": "Invalid date format. Use MM-DD, for example 01-01."
         },
         "abort": {
             "already_configured": "Service is already configured"

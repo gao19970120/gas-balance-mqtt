@@ -8,6 +8,24 @@
                     "name": "名称",
                     "topic": "余额 MQTT 主题",
                     "bill_topic": "账单 MQTT 主题",
+                    "tier_cycle_start_md": "每年阶梯开始日期（月-日）",
+                    "tier_cycle_end_md": "每年阶梯结束日期（月-日）",
+                    "yearly_step_2_start_volume": "年阶梯二起始用量",
+                    "yearly_step_3_start_volume": "年阶梯三起始用量",
+                    "year_step_1_price": "年阶梯一价格",
+                    "year_step_2_price": "年阶梯二价格",
+                    "year_step_3_price": "年阶梯三价格"
+                }
+            },
+            "init": {
+                "title": "燃气余额设置",
+                "description": "修改燃气余额 MQTT、年度阶梯周期和阶梯价格配置。保存后集成会自动重新加载。",
+                "data": {
+                    "name": "名称",
+                    "topic": "余额 MQTT 主题",
+                    "bill_topic": "账单 MQTT 主题",
+                    "tier_cycle_start_md": "每年阶梯开始日期（月-日）",
+                    "tier_cycle_end_md": "每年阶梯结束日期（月-日）",
                     "yearly_step_2_start_volume": "年阶梯二起始用量",
                     "yearly_step_3_start_volume": "年阶梯三起始用量",
                     "year_step_1_price": "年阶梯一价格",
@@ -17,7 +35,8 @@
             }
         },
         "error": {
-            "already_configured": "服务已配置"
+            "already_configured": "服务已配置",
+            "invalid_date": "日期格式错误，请使用 MM-DD，例如 01-01"
         },
         "abort": {
             "already_configured": "服务已配置"

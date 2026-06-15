@@ -1,6 +1,7 @@
 import json
 import logging
-from datetime import timedelta
+from calendar import monthrange
+from datetime import date, timedelta
 import voluptuous as vol
 
 from homeassistant.components.sensor import (
@@ -19,17 +20,60 @@ from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _date_to_md(value, fallback):
+    """Convert a stored date value to MM-DD."""
+    value = str(value or "").replace(".", "-").strip()
+    if len(value) == 10:
+        return value[5:10]
+    if len(value) == 5:
+        return value
+    return fallback
+
+
+def _safe_date(year, md):
+    """Create a date from MM-DD, clamping Feb 29 on non-leap years."""
+    month, day = (int(part) for part in md.split("-", 1))
+    day = min(day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _resolve_tier_period(start_md, end_md, today):
+    """Resolve the configured annual tier cycle to concrete dates."""
+    start_md = _date_to_md(start_md, "01-01")
+    end_md = _date_to_md(end_md, "12-31")
+    start_tuple = tuple(int(part) for part in start_md.split("-", 1))
+    end_tuple = tuple(int(part) for part in end_md.split("-", 1))
+    today_tuple = (today.month, today.day)
+
+    if start_tuple <= end_tuple:
+        if today_tuple < start_tuple:
+            start_year = today.year - 1
+        else:
+            start_year = today.year
+        end_year = start_year if start_tuple <= end_tuple else start_year + 1
+    else:
+        if today_tuple >= start_tuple:
+            start_year = today.year
+            end_year = today.year + 1
+        else:
+            start_year = today.year - 1
+            end_year = today.year
+
+    return _safe_date(start_year, start_md), _safe_date(end_year, end_md)
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Gas Balance sensor from a config entry."""
-    name = entry.data.get("name")
-    topic = entry.data.get("topic")
-    bill_topic = entry.data.get("bill_topic", "gas/raw/month_bill")
+    config_data = {**entry.data, **entry.options}
+    name = config_data.get("name")
+    topic = config_data.get("topic")
+    bill_topic = config_data.get("bill_topic", "gas/raw/month_bill")
 
-    async_add_entities([GasBalanceSensor(name, topic, bill_topic, entry.data)], True)
+    async_add_entities([GasBalanceSensor(name, topic, bill_topic, config_data)], True)
 
 
 class GasBalanceSensor(RestoreEntity, SensorEntity):
@@ -43,8 +87,7 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
         self._state = None
         
         # Dynamic yearly step configuration
-        now = dt_util.now()
-        current_year = now.year
+        today = dt_util.now().date()
         
         # Default values or from config
         yearly_step_2_start = config_data.get("yearly_step_2_start_volume", 400)
@@ -52,10 +95,23 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
         year_step_1_price = config_data.get("year_step_1_price", 2.99)
         year_step_2_price = config_data.get("year_step_2_price", 3.44)
         year_step_3_price = config_data.get("year_step_3_price", 4.34)
+        tier_cycle_start_md = _date_to_md(
+            config_data.get("tier_cycle_start_md", config_data.get("current_year_step_start_date")),
+            "01-01",
+        )
+        tier_cycle_end_md = _date_to_md(
+            config_data.get("tier_cycle_end_md", config_data.get("current_year_step_end_date")),
+            "12-31",
+        )
+        current_year_step_start_date, current_year_step_end_date = _resolve_tier_period(
+            tier_cycle_start_md, tier_cycle_end_md, today
+        )
         
         self._year_step_config = {
-            "current_year_step_start_date": f"{current_year}.01.01",
-            "current_year_step_end_date": f"{current_year}.12.31",
+            "tier_cycle_start_md": tier_cycle_start_md,
+            "tier_cycle_end_md": tier_cycle_end_md,
+            "current_year_step_start_date": current_year_step_start_date.strftime("%Y.%m.%d"),
+            "current_year_step_end_date": current_year_step_end_date.strftime("%Y.%m.%d"),
             "yearly_step_2_start_volume": yearly_step_2_start,
             "yearly_step_3_start_volume": yearly_step_3_start,
             "year_step_1_price": year_step_1_price,
@@ -72,6 +128,8 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
             "cust_name": None,
             "address": None,
             # Initialize with config values
+            "tier_cycle_start_md": self._year_step_config["tier_cycle_start_md"],
+            "tier_cycle_end_md": self._year_step_config["tier_cycle_end_md"],
             "current_year_step_start_date": self._year_step_config["current_year_step_start_date"],
             "current_year_step_end_date": self._year_step_config["current_year_step_end_date"],
             "yearly_step_2_start_volume": self._year_step_config["yearly_step_2_start_volume"],
@@ -386,7 +444,21 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
     def _calculate_yearly_usage(self):
         """Calculate yearly accumulated gas usage."""
         try:
+            def normalize_date_str(value, fallback):
+                value = str(value or "").replace(".", "-")
+                if len(value) == 10:
+                    return value
+                return fallback
+
             current_year_str = self._year_step_config["current_year_step_start_date"][:4] # "2025"
+            current_year_start_str = normalize_date_str(
+                self._year_step_config.get("current_year_step_start_date"),
+                f"{current_year_str}-01-01",
+            )
+            current_year_end_str = normalize_date_str(
+                self._year_step_config.get("current_year_step_end_date"),
+                f"{current_year_str}-12-31",
+            )
             split_day = self._attributes.get("split_day", 22)
             split_day_str = str(split_day).zfill(2)
             
@@ -449,66 +521,20 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
             # Since monthlist is now Natural Month data, we don't need to do split-day adjustments for historical years.
             # The sum of natural months is the yearly total.
 
-            # --- 2. Calculate Current Year Usage (Detailed Logic) ---
-            
-            # 2.1 Sum up monthly usage for the current year
-            current_year_bill_usage = 0.0
-            current_year_bill_cost = 0.0
-            latest_bill_month_str = ""
-            
-            for month_data in month_list:
-                month_str = month_data.get("month", "")
-                if month_str.startswith(current_year_str):
-                    try:
-                        usage = float(month_data.get("monthGasNum", 0))
-                        cost = float(month_data.get("monthGasCost", 0))
-                        current_year_bill_usage += usage
-                        current_year_bill_cost += cost
-                        
-                        if month_str > latest_bill_month_str:
-                            latest_bill_month_str = month_str
-                    except (ValueError, TypeError):
-                        continue
-            
-            # No deduction needed for Jan since monthlist is natural.
-
-            # 2.2 Add daily usage since the end of the last bill month
-            running_usage = current_year_bill_usage
-            
-            target_date_str = ""
-            if latest_bill_month_str:
-                # If we have bills up to "2025-01", and it's natural month, it covers up to 2025-01-31.
-                # So we start counting from 2025-02-01.
-                # Calculate next month start date
-                try:
-                    y = int(latest_bill_month_str[:4])
-                    m = int(latest_bill_month_str[5:7])
-                    if m == 12:
-                        y += 1
-                        m = 1
-                    else:
-                        m += 1
-                    target_date_str = f"{y:04d}-{m:02d}-01"
-                except:
-                    target_date_str = f"{current_year_str}-01-01"
-            else:
-                # No bills yet for current year, start from Jan 1
-                target_date_str = f"{current_year_str}-01-01"
-            
-            # Note: day_list is already retrieved above
-            
+            # --- 2. Calculate Current Year Step Usage ---
+            # The gas company's annual tier period is configured explicitly.
+            # Recalculate every day in that period from its cost and the running
+            # tier total, so natural month display rows never affect tier pricing.
+            running_usage = 0.0
             daily_estimated_usage = 0.0
             daily_estimated_cost = 0.0
             
-            for day_data in day_list:
+            for day_data in sorted(day_list, key=lambda item: item.get("day", "") if isinstance(item, dict) else ""):
                 if not isinstance(day_data, dict):
                     continue
 
-                day_str = day_data.get("day", "")
-                
-                is_relevant_day = False
-                if day_str >= target_date_str:
-                     is_relevant_day = True
+                day_str = str(day_data.get("day", "")).split(" ")[0]
+                is_relevant_day = current_year_start_str <= day_str <= current_year_end_str
 
                 if is_relevant_day:
                     try:
@@ -533,8 +559,8 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
                     except (ValueError, TypeError):
                         continue
                 else:
-                    # For older days, just fill missing data if needed, but don't add to current year total
-                    # (This part is preserved from previous logic)
+                    # For days outside the configured tier period, keep a best-effort
+                    # usage value for display only. They must not affect current tiers.
                     if "dayGasNum" not in day_data:
                          try:
                             cost = float(day_data.get("dayGasCost", 0))
@@ -546,8 +572,8 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
                             pass
 
             # Total for current year
-            total_current_year_usage = current_year_bill_usage + daily_estimated_usage
-            total_current_year_cost = current_year_bill_cost + daily_estimated_cost
+            total_current_year_usage = daily_estimated_usage
+            total_current_year_cost = daily_estimated_cost
             
             # Update attribute for accumulated usage
             self._attributes["yearly_step_accumulated_usage"] = round(total_current_year_usage, 2)
@@ -610,6 +636,7 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
         # Initial calculation after restore
         try:
             self._migrate_historical_data()
+            self._calculate_yearly_usage()
             self._calculate_natural_month_data()
             self._calculate_yearly_usage()
         except Exception as e:
@@ -794,10 +821,10 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
                 if updated:
                     self._attributes["monthly_bill_source_data"] = current_source_list
                     
-                    # Recalculate natural month data
+                    # Recalculate day usage first, then rebuild natural month data
+                    # from the corrected daylist, and finally refresh yearly totals.
+                    self._calculate_yearly_usage()
                     self._calculate_natural_month_data()
-                    
-                    # Recalculate yearly usage
                     self._calculate_yearly_usage()
                     
                     self.async_write_ha_state()
@@ -807,11 +834,13 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
             except Exception as e:
                 _LOGGER.error("Error processing bill message: %s", e)
 
-        await mqtt.async_subscribe(
+        unsubscribe_balance = await mqtt.async_subscribe(
             self.hass, self._topic, message_received, 1
         )
+        self.async_on_remove(unsubscribe_balance)
         
         if self._bill_topic:
-            await mqtt.async_subscribe(
+            unsubscribe_bill = await mqtt.async_subscribe(
                 self.hass, self._bill_topic, bill_message_received, 1
             )
+            self.async_on_remove(unsubscribe_bill)
