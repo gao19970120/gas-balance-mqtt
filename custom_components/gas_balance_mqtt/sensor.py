@@ -62,6 +62,20 @@ def _resolve_tier_period(start_md, end_md, today):
 
     return _safe_date(start_year, start_md), _safe_date(end_year, end_md)
 
+
+def _distribute_cost(total_cost, day_count):
+    """Distribute a monetary total by cents while preserving the exact sum."""
+    if day_count <= 0:
+        return []
+
+    total_cents = int(round(float(total_cost) * 100))
+    base_cents, remainder = divmod(total_cents, day_count)
+    return [
+        (base_cents + (1 if index < remainder else 0)) / 100
+        for index in range(day_count)
+    ]
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -441,6 +455,144 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
         except Exception as e:
             _LOGGER.error("Error migrating historical data: %s", e)
 
+    @staticmethod
+    def _day_value_to_date(day_value):
+        """Convert a daylist value to a date."""
+        try:
+            return date.fromisoformat(str(day_value).split(" ")[0])
+        except (TypeError, ValueError):
+            return None
+
+    def _last_daylist_date(self):
+        """Return the latest valid date stored in daylist."""
+        day_list = self._attributes.get("daylist", [])
+        valid_dates = [
+            parsed
+            for item in day_list
+            if isinstance(item, dict)
+            for parsed in [self._day_value_to_date(item.get("day"))]
+            if parsed is not None
+        ]
+        return max(valid_dates) if valid_dates else None
+
+    def _replace_cost_range(self, dates, total_cost):
+        """Replace a date range with evenly distributed cost entries."""
+        if not dates:
+            return
+
+        day_list = self._attributes.get("daylist")
+        if not isinstance(day_list, list):
+            day_list = []
+
+        date_strings = {item.isoformat() for item in dates}
+        retained = [
+            item
+            for item in day_list
+            if not isinstance(item, dict)
+            or str(item.get("day", "")).split(" ")[0] not in date_strings
+        ]
+        distributed_costs = _distribute_cost(total_cost, len(dates))
+        retained.extend(
+            {
+                "day": item_date.isoformat(),
+                "dayGasCost": round(item_cost, 2),
+            }
+            for item_date, item_cost in zip(dates, distributed_costs)
+        )
+        retained.sort(
+            key=lambda item: str(item.get("day", ""))
+            if isinstance(item, dict)
+            else ""
+        )
+        self._attributes["daylist"] = retained[-365:]
+
+    def _repair_recent_missing_days(self, today=None):
+        """Split aggregate records over missing dates from the last 30 days."""
+        today = today or dt_util.now().date()
+        window_end = today - timedelta(days=1)
+        window_start = window_end - timedelta(days=29)
+        day_list = self._attributes.get("daylist")
+        if not isinstance(day_list, list):
+            return False
+
+        rows_by_date = {}
+        for item in day_list:
+            if not isinstance(item, dict):
+                continue
+            item_date = self._day_value_to_date(item.get("day"))
+            if item_date is not None:
+                rows_by_date[item_date] = item
+
+        changed = False
+        missing_dates = []
+        current_date = window_start
+        while current_date <= window_end:
+            row = rows_by_date.get(current_date)
+            if row is None:
+                missing_dates.append(current_date)
+            else:
+                try:
+                    cost = float(row.get("dayGasCost", 0))
+                except (TypeError, ValueError):
+                    cost = 0.0
+
+                if missing_dates and cost > 0:
+                    allocation_dates = [*missing_dates, current_date]
+                    self._replace_cost_range(allocation_dates, cost)
+                    for allocation_date, allocation_cost in zip(
+                        allocation_dates,
+                        _distribute_cost(cost, len(allocation_dates)),
+                    ):
+                        rows_by_date[allocation_date] = {
+                            "day": allocation_date.isoformat(),
+                            "dayGasCost": round(allocation_cost, 2),
+                        }
+                    changed = True
+
+                # Existing zero-cost rows are authoritative and terminate a gap.
+                missing_dates = []
+
+            current_date += timedelta(days=1)
+
+        if changed:
+            _LOGGER.info("Repaired missing gas day data in the last 30 days")
+        return changed
+
+    def _allocate_balance_change(self, current_balance, now):
+        """Allocate a balance change over every unrecorded completed day."""
+        if self._last_balance is None:
+            return False
+
+        calculation_last_balance = self._last_balance
+
+        # Recharges are made in 100-yuan increments. Add enough increments to
+        # recover the usage cost represented by the new balance.
+        while calculation_last_balance < current_balance:
+            calculation_last_balance += 100.0
+
+        total_gas_cost = round(calculation_last_balance - current_balance, 2)
+        allocation_end = now.date() - timedelta(days=1)
+        last_day_date = self._last_daylist_date()
+
+        if last_day_date is not None:
+            allocation_start = last_day_date + timedelta(days=1)
+        elif self._last_update_dt is not None:
+            allocation_start = self._last_update_dt.date()
+        else:
+            allocation_start = allocation_end
+
+        if total_gas_cost < 0 or allocation_start > allocation_end:
+            return False
+
+        allocation_dates = []
+        item_date = allocation_start
+        while item_date <= allocation_end:
+            allocation_dates.append(item_date)
+            item_date += timedelta(days=1)
+
+        self._replace_cost_range(allocation_dates, total_gas_cost)
+        return True
+
     def _calculate_yearly_usage(self):
         """Calculate yearly accumulated gas usage."""
         try:
@@ -546,15 +698,20 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
                         
                         # Check if we should re-calculate dayGasNum or trust existing?
                         # Previous logic re-calculated it. Let's stick to that to be safe and consistent.
+                        rounded_usage_before = round(running_usage, 2)
                         day_usage = self._calculate_usage_from_cost(running_usage, cost)
+                        running_usage += day_usage
                         
-                        # Update daylist with calculated usage using NEW keys
-                        day_data["dayGasNum"] = round(day_usage, 2)
+                        # Cumulative rounding keeps the sum of rounded daily usage
+                        # equal to the rounded usage total for the whole period.
+                        day_data["dayGasNum"] = round(
+                            round(running_usage, 2) - rounded_usage_before,
+                            2,
+                        )
                         day_data["dayGasCost"] = cost
                         
                         daily_estimated_usage += day_usage
                         daily_estimated_cost += cost
-                        running_usage += day_usage
                         
                     except (ValueError, TypeError):
                         continue
@@ -636,6 +793,7 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
         # Initial calculation after restore
         try:
             self._migrate_historical_data()
+            self._repair_recent_missing_days()
             self._calculate_yearly_usage()
             self._calculate_natural_month_data()
             self._calculate_yearly_usage()
@@ -679,52 +837,9 @@ class GasBalanceSensor(RestoreEntity, SensorEntity):
                 now = dt_util.now()
                 
                 # --- Daily Cost Calculation Logic ---
-                # Logic:
-                # If last update < Today 07:00 AND current update > Today 07:30
-                # Calculate cost = last_balance - current_balance
-                # Date = Yesterday
-                
-                if self._last_balance is not None and self._last_update_dt is not None:
-                    today_0am = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                    
-                    # Check if we crossed the day boundary
-                    # Last update was before today 00:00:00
-                    if self._last_update_dt < today_0am:
-                        calculation_last_balance = self._last_balance
-                        
-                        # Handle recharge scenario (current > last)
-                        if current_balance > calculation_last_balance:
-                            # Add 100s until calculation_last_balance > current_balance
-                            # We interpret "until higher" as covering the current balance
-                            # to ensure usage calculation is correct even if usage is small
-                            while calculation_last_balance < current_balance:
-                                calculation_last_balance += 100.0
-
-                        # Calculate cost
-                        day_gas_cost = calculation_last_balance - current_balance
-                        
-                        # Only record if positive usage (or zero), assuming balance goes down
-                        # Use round to handle float precision
-                        day_gas_cost = round(day_gas_cost, 2)
-
-                        # Note: dayGasNum will be calculated in _calculate_yearly_usage
-                        # We initialize it here but it will be updated immediately
-                        
-                        # Date is previous day
-                        yesterday = now - timedelta(days=1)
-                        day_str = yesterday.strftime("%Y-%m-%d")
-                        
-                        # Add to daylist
-                        new_entry = {
-                            "day": day_str,
-                            "dayGasCost": day_gas_cost
-                        }
-                        
-                        # Avoid duplicate entries for the same day if logic triggers multiple times
-                        if not self._attributes["daylist"] or self._attributes["daylist"][-1]["day"] != day_str:
-                            self._attributes["daylist"].append(new_entry)
-                            if len(self._attributes["daylist"]) > 365:
-                                self._attributes["daylist"].pop(0)
+                # The remote balance only changes in whole usage units. A single
+                # balance change may therefore represent several calendar days.
+                self._allocate_balance_change(current_balance, now)
 
                 # Update State
                 self._state = current_balance
